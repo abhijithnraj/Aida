@@ -24,7 +24,6 @@ pip install -r requirements.txt
 
 3. Make sure you have Ollama installed, running and the models downloaded.
 
-```
 
 ## Usage
 
