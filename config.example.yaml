@@ -1,0 +1,14 @@
+# AIDA Configuration File
+# You can place this file at ~/.config/aida/config.yaml
+# Or specify a custom path with AIDA_CONFIG_PATH environment variable
+
+# Core model for main functionality
+core_model: qwen2.5-coder:32b
+
+# Model for preprocessing queries
+preprocessor_model: llama3.2
+
+# Environment Variables:
+# AIDA_CONFIG_PATH - Path to this config file
+# AIDA_CORE_MODEL - Override core model
+# AIDA_PREPROCESSOR_MODEL - Override preprocessor model 

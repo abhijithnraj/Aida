@@ -7,6 +7,7 @@ from langchain_ollama import ChatOllama
 from .preprocessor import QueryPreprocessor
 from .config import AidaConfig
 import logging
+import subprocess
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -16,10 +17,23 @@ logger = logging.getLogger(__name__)
 class Aida:
     def __init__(self, config: Optional[AidaConfig] = None):
         self.config = config or AidaConfig()
+        self._validate_available_models()
         self.llm = ChatOllama(model=self.config.core_model, temperature=0)
         self.tools = self._setup_tools()
         self.agent = self._setup_agent()
         self.preprocessor = QueryPreprocessor(model_name=self.config.preprocessor_model)
+        
+    def _validate_available_models(self):
+        logger.info("Checking available models...")
+        process = subprocess.Popen(["ollama", "list"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        output, error = process.communicate()
+        if process.returncode != 0:
+            logger.error("Failed to run 'ollama list': %s", error.strip())
+        else:
+            logger.info("Available models:\n%s", output)
+            available_models = [model.split()[0] for model in output.splitlines()[1:] if model.strip()]
+            if self.config.core_model not in available_models:
+                raise ValueError(f"Model '{self.config.core_model}' is not available. Available models are: {available_models}")
     
     def _setup_tools(self) -> list[Tool]:
         shell_tool = ShellTool()
