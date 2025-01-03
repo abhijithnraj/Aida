@@ -1,7 +1,9 @@
-from typing import Optional
+from typing import Optional, List, Dict
 from langchain.agents import initialize_agent, AgentType
 from langchain.agents import Tool
 from langchain_community.tools import ShellTool
+from langchain.memory import ConversationBufferWindowMemory
+from langchain.schema import HumanMessage, AIMessage
 from .preprocessor import QueryPreprocessor
 from .config import AidaConfig
 from .providers import LLMProviderFactory
@@ -10,10 +12,66 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+class ValidatedShellTool:
+    """A wrapper around ShellTool that requires user validation before execution"""
+    def __init__(self):
+        self.shell_tool = ShellTool()
+    
+    def run(self, command: str) -> str:
+        print(f"\nCommand to execute: {command}")
+        user_input = input("Do you want to execute this command? (y/n/modify): ").lower().strip()
+        
+        if user_input == 'y':
+            return self.shell_tool.run(command)
+        elif user_input == 'modify':
+            modified_command = input("Enter the modified command: ").strip()
+            return self.shell_tool.run(modified_command)
+        else:
+            return "Command execution cancelled by user with this input: " + user_input
+
+class ConversationManager:
+    """Manages conversation history for both preprocessor and core model"""
+    def __init__(self):
+        self.messages: List[Dict[str, str]] = []
+    
+    def add_user_message(self, message: str):
+        self.messages.append({"role": "user", "content": message})
+    
+    def add_assistant_message(self, message: str):
+        self.messages.append({"role": "assistant", "content": message})
+    
+    def add_preprocessor_result(self, is_relevant: bool, reason: str):
+        self.messages.append({"role": "system", "content": f"Preprocessor: {'Relevant' if is_relevant else 'Not relevant'} - {reason}"})
+    
+    def get_recent_messages(self, count: int = 5) -> str:
+        """Get the most recent messages formatted as a string"""
+        recent = self.messages[-count:] if len(self.messages) > count else self.messages
+        formatted = []
+        for msg in recent:
+            prefix = {
+                "user": "User",
+                "assistant": "Assistant",
+                "system": "System"
+            }.get(msg["role"], msg["role"])
+            formatted.append(f"{prefix}: {msg['content']}")
+        return "\n".join(formatted)
+    
+    def get_memory_messages(self) -> List[HumanMessage | AIMessage]:
+        """Convert messages to LangChain message format"""
+        memory_messages = []
+        for msg in self.messages:
+            if msg["role"] == "user":
+                memory_messages.append(HumanMessage(content=msg["content"]))
+            elif msg["role"] == "assistant":
+                memory_messages.append(AIMessage(content=msg["content"]))
+        return memory_messages
 
 class Aida:
     def __init__(self, config: Optional[AidaConfig] = None):
         self.config = config or AidaConfig()
+        
+        # Initialize conversation manager
+        self.conversation = ConversationManager()
         
         # Initialize core LLM provider
         self.llm = LLMProviderFactory.get_provider(
@@ -25,17 +83,19 @@ class Aida:
         self.tools = self._setup_tools()
         self.agent = self._setup_agent()
         
-        # Initialize preprocessor with its own LLM provider
+        # Initialize preprocessor with conversation manager
         self.preprocessor = QueryPreprocessor(
-            config=self.config
+            config=self.config,
+            conversation=self.conversation
         )
     
     def _setup_tools(self) -> list[Tool]:
         return [
             Tool(
                 name="shell",
-                func= ShellTool().run,
+                func=ValidatedShellTool().run,
                 description="""Execute shell commands on the server. Use this tool to run commands and get their output.
+                The command will be shown to the user for validation before execution.
                 Example:
                 Action: shell
                 Action Input: who
@@ -53,7 +113,7 @@ class Aida:
             agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
             verbose=True,
             handle_parsing_errors=True,
-            max_iterations=6,
+            max_iterations=20,
             early_stopping_method="force",
             return_intermediate_steps=True,
             agent_kwargs={
@@ -61,6 +121,9 @@ class Aida:
                 When asked a question, you MUST use the available tools to help the user.
                 NEVER make up or hallucinate command outputs.
                 ALWAYS use the shell tool to execute commands and get real output.
+                
+                You have access to chat history, so you can refer to previous questions and answers.
+                When answering follow-up questions, make sure to consider the context from previous interactions.
                 
                 Important rules:
                 1. ALWAYS use the shell tool to execute commands
@@ -71,6 +134,7 @@ class Aida:
                 6. Always have at the very least Thought and Final Answer in response.
                 7. Always end the response with a Final Answer. This is very important and it has to answer the query posed by the user.
                 8. Only the Final answer is shown to the user, so it should include all the information needed to answer the query.
+                9. For follow-up questions, consider the context from previous interactions.
                 Example interaction:
                 Example 1:
                     Question: How many users are logged in?
@@ -89,6 +153,11 @@ class Aida:
                     user2    pts/1    2024-01-31 10:05 (:0)
                     user3    pts/2    2024-01-31 10:10 (:0)
                     Final Answer: There are 3 users currently logged in: user1, user2, and user3. Each is connected through a pseudo-terminal (pts).
+                    
+                Example 3 (Follow-up):
+                    Question: When did they log in?
+                    Thought: From the previous 'who' command output, I can see the login times
+                    Final Answer: Looking at the previous information: user1 logged in at 10:00, user2 at 10:05, and user3 at 10:10 on January 31st, 2024.
                 """,
                 "format_instructions": """To use a tool, please use the following format:
                 Thought: I need to use X tool because...
@@ -117,19 +186,27 @@ class Aida:
         """Process a user query and return a response"""
         if not query:
             return "Empty query. Please ask a question."
-            
+        
+        # Add user query to conversation history
+        self.conversation.add_user_message(query)
+        
+        # Construct the prompt for the query using conversation history
+        prompt = self.conversation.get_recent_messages() + f"\nUser: {query}"
+        
         # First check if query is relevant using preprocessor
         preprocessor_result = self.preprocessor.process_query(query)
         if not preprocessor_result.is_relevant:
-            return preprocessor_result.response or "This query is not related to server management."
+            response = preprocessor_result.response or "This query is not related to server management."
+            self.conversation.add_assistant_message(response)
+            return response
             
         try:
             # Run the agent to process the query
-            response = self.agent.invoke({"input": query})
+            response = self.agent.invoke({"input": prompt})  # Use constructed prompt
             logger.info(f"Response: {response}")
             
             # Skip validation for strong models
-            if not  self.llm.is_strong():
+            if not self.llm.is_strong():
                 # Validate response has Final Answer
                 if not self._validate_response(response):
                     # Print the response variable for debugging
@@ -145,12 +222,19 @@ class Aida:
                         Remember to start with "Final Answer:" and provide a clear, direct response. Don't say anything about agent."""
                     ).content
                     response = final_response.lstrip("Final Answer:").strip()
+                
+                # Add assistant response to conversation history
+                self.conversation.add_assistant_message(response)
                 return response
             else:
+                # Add assistant response to conversation history
+                self.conversation.add_assistant_message(response["output"])
                 return response["output"]
         except Exception as e:
             logger.error("Error processing query: %s", str(e))
-            return f"Error processing query: {str(e)}"
+            error_response = f"Error processing query: {str(e)}"
+            self.conversation.add_assistant_message(error_response)
+            return error_response
 
 if __name__ == "__main__":
     aida = Aida()
