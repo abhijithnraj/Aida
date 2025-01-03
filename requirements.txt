@@ -1,6 +1,10 @@
 langchain>=0.0.335
 langchain-community>=0.0.10
 langchain-ollama>=0.0.1
+langchain-google-genai>=0.0.5
 python-dotenv>=1.0.0
 pytest>=7.4.3
 requests>=2.31.0
+pyyaml>=6.0.1
+duckduckgo-search>=3.0.0
+click>=8.1.7

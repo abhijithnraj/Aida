@@ -8,6 +8,7 @@ def main():
     parser = argparse.ArgumentParser(description="AIDA - AI Server Management Assistant")
     parser.add_argument("--core-model", help="Name of the LLM model to use for core functionality")
     parser.add_argument("--preprocessor-model", help="Name of the LLM model to use for preprocessing")
+    parser.add_argument("--provider", help="Name of the LLM provider to use for both core and preprocessing")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument("--config", type=Path, help="Path to config file")
     args = parser.parse_args()
@@ -64,4 +65,4 @@ def main():
     print("\nGoodbye!")
 
 if __name__ == "__main__":
-    main() 
+    main()

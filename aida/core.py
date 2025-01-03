@@ -1,46 +1,41 @@
 from typing import Optional
 from langchain.agents import initialize_agent, AgentType
 from langchain.agents import Tool
-from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_community.tools import ShellTool
-from langchain_ollama import ChatOllama
 from .preprocessor import QueryPreprocessor
 from .config import AidaConfig
+from .providers import LLMProviderFactory
 import logging
-import subprocess
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-
 class Aida:
     def __init__(self, config: Optional[AidaConfig] = None):
         self.config = config or AidaConfig()
-        self._validate_available_models()
-        self.llm = ChatOllama(model=self.config.core_model, temperature=0)
+        
+        # Initialize core LLM provider
+        self.llm = LLMProviderFactory.get_provider(
+            provider_type=self.config.core_provider,
+            model=self.config.core_model,
+            temperature=0
+        )
+        
         self.tools = self._setup_tools()
         self.agent = self._setup_agent()
-        self.preprocessor = QueryPreprocessor(model_name=self.config.preprocessor_model)
         
-    def _validate_available_models(self):
-        logger.info("Checking available models...")
-        process = subprocess.Popen(["ollama", "list"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        output, error = process.communicate()
-        if process.returncode != 0:
-            logger.error("Failed to run 'ollama list': %s", error.strip())
-        else:
-            logger.info("Available models:\n%s", output)
-            available_models = [model.split()[0] for model in output.splitlines()[1:] if model.strip()]
-            if self.config.core_model not in available_models:
-                raise ValueError(f"Model '{self.config.core_model}' is not available. Available models are: {available_models}")
+        # Initialize preprocessor with its own LLM provider
+        self.preprocessor = QueryPreprocessor(
+            provider_type=self.config.preprocessor_provider,
+            model_name=self.config.preprocessor_model
+        )
     
     def _setup_tools(self) -> list[Tool]:
-        shell_tool = ShellTool()
         return [
             Tool(
                 name="shell",
-                func=shell_tool.run,
+                func= ShellTool().run,
                 description="""Execute shell commands on the server. Use this tool to run commands and get their output.
                 Example:
                 Action: shell
@@ -55,7 +50,7 @@ class Aida:
         # Using ZERO_SHOT_REACT_DESCRIPTION which follows a thought-action-observation pattern
         return initialize_agent(
             tools=self.tools,
-            llm=self.llm,
+            llm=self.llm.llm,  # Access the underlying LangChain LLM
             agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
             verbose=True,
             handle_parsing_errors=True,
@@ -75,8 +70,8 @@ class Aida:
                 4. Never Execute the same command more than once
                 5. After getting command output, explain what it means
                 6. Always have at the very least Thought and Final Answer in response.
-                6. Always end the response with a Final Answer. This is very important and it has to answer the query posed by the user.
-                
+                7. Always end the response with a Final Answer. This is very important and it has to answer the query posed by the user.
+                8. Only the Final answer is shown to the user, so it should include all the information needed to answer the query.
                 Example interaction:
                 Example 1:
                     Question: How many users are logged in?
@@ -101,7 +96,7 @@ class Aida:
                 Action: the action to take, should be one of [{tool_names}]
                 Action Input: the input to the action
                 Observation: the result of the action
-                ... (this Thought/Action/Action Input/Observation can repeat N times)
+                ... (this Thought/Action/Action Input/Observation can repeat N times). It always has to follow this format.
                 Thought: I now know what to respond
                 Final Answer: the final response to the human"""
             }
@@ -120,24 +115,17 @@ class Aida:
         return "Final Answer:" in response
     
     def process_query(self, query: str) -> str:
-        """
-        Process a natural language query and return the response
-        
-        Args:
-            query: The natural language query from the user
+        """Process a user query and return a response"""
+        if not query:
+            return "Empty query. Please ask a question."
             
-        Returns:
-            str: The response from the AI assistant
-        """
+        # First check if query is relevant using preprocessor
+        preprocessor_result = self.preprocessor.process_query(query)
+        if not preprocessor_result.is_relevant:
+            return preprocessor_result.response or "This query is not related to server management."
+            
         try:
-            logger.info(f"Processing query: {query}")
-            
-            # First check if query is relevant to server management
-            preprocess_result = self.preprocessor.process_query(query)
-            if not preprocess_result.is_relevant:
-                return preprocess_result.response
-            
-            # If query is relevant, process it with the agent
+            # Run the agent to process the query
             response = self.agent.invoke({"input": query})
             logger.info(f"Response: {response}")
             
@@ -158,11 +146,11 @@ class Aida:
                 response = final_response.lstrip("Final Answer:").strip()
             return response
         except Exception as e:
-            logger.error(f"Error processing query: {str(e)}")
+            logger.error("Error processing query: %s", str(e))
             return f"Error processing query: {str(e)}"
-        
+
 if __name__ == "__main__":
-    aida = Aida(model_name="llama3.1:8b")
+    aida = Aida()
     response = aida.process_query("How long has the server been running?")
     print("AIDA Response:", response)
     print("DONE")
