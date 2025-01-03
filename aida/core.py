@@ -27,8 +27,7 @@ class Aida:
         
         # Initialize preprocessor with its own LLM provider
         self.preprocessor = QueryPreprocessor(
-            provider_type=self.config.preprocessor_provider,
-            model_name=self.config.preprocessor_model
+            config=self.config
         )
     
     def _setup_tools(self) -> list[Tool]:
@@ -129,22 +128,26 @@ class Aida:
             response = self.agent.invoke({"input": query})
             logger.info(f"Response: {response}")
             
-            # Validate response has Final Answer
-            if not self._validate_response(response):
-                # Print the response variable for debugging
-                print(f"Response before validation: {response}")
-                
-                # If no Final Answer, try to get one
-                final_response = self.llm.invoke(
-                    f"""Based on this conversation and output, please provide a Final Answer that directly answers the user's question: "{query}"
+            # Skip validation for strong models
+            if not  self.llm.is_strong():
+                # Validate response has Final Answer
+                if not self._validate_response(response):
+                    # Print the response variable for debugging
+                    print(f"Response before validation: {response}")
                     
-                    Previous output:
-                    {response}
-                    
-                    Remember to start with "Final Answer:" and provide a clear, direct response. Don't say anything about agent."""
-                ).content
-                response = final_response.lstrip("Final Answer:").strip()
-            return response
+                    # If no Final Answer, try to get one
+                    final_response = self.llm.invoke(
+                        f"""Based on this conversation and output, please provide a Final Answer that directly answers the user's question: "{query}"
+                        
+                        Previous output:
+                        {response}
+                        
+                        Remember to start with "Final Answer:" and provide a clear, direct response. Don't say anything about agent."""
+                    ).content
+                    response = final_response.lstrip("Final Answer:").strip()
+                return response
+            else:
+                return response["output"]
         except Exception as e:
             logger.error("Error processing query: %s", str(e))
             return f"Error processing query: {str(e)}"

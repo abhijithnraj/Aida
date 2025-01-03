@@ -17,4 +17,9 @@ class LLMProvider(ABC):
     @abstractmethod
     def validate_model(self, model: str) -> bool:
         """Validate if the specified model is available"""
+        pass
+    
+    @abstractmethod
+    def is_strong(self) -> bool:
+        """Return whether this model is considered strong enough to skip validation steps"""
         pass 

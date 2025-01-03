@@ -34,3 +34,7 @@ class OllamaProvider(LLMProvider):
         logger.info("Available models:\n%s", output)
         available_models = [model.split()[0] for model in output.splitlines()[1:] if model.strip()]
         return model in available_models 
+    
+    def is_strong(self) -> bool:
+        """Return whether this model is considered strong enough to skip validation steps"""
+        return False
