@@ -3,6 +3,7 @@ import logging
 from pathlib import Path
 from .core import Aida
 from .config import AidaConfig
+from .gui import main as gui_main
 
 def main():
     parser = argparse.ArgumentParser(description="AIDA - AI Server Management Assistant")
@@ -11,7 +12,13 @@ def main():
     parser.add_argument("--provider", help="Name of the LLM provider to use for both core and preprocessing")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument("--config", type=Path, help="Path to config file")
+    parser.add_argument("--gui", action="store_true", help="Launch the GUI interface")
     args = parser.parse_args()
+
+    # If GUI mode is requested, launch it
+    if args.gui:
+        gui_main()
+        return
 
     # Load config from file and update with CLI args
     config = AidaConfig.from_file(args.config)

@@ -14,20 +14,40 @@ logger = logging.getLogger(__name__)
 
 class ValidatedShellTool:
     """A wrapper around ShellTool that requires user validation before execution"""
-    def __init__(self):
+    def __init__(self, gui_validator=None):
         self.shell_tool = ShellTool()
+        self.gui_validator = gui_validator
+        self.result = None
     
     def run(self, command: str) -> str:
-        print(f"\nCommand to execute: {command}")
-        user_input = input("Do you want to execute this command? (y/n/modify): ").lower().strip()
-        
-        if user_input == 'y':
-            return self.shell_tool.run(command)
-        elif user_input == 'modify':
-            modified_command = input("Enter the modified command: ").strip()
-            return self.shell_tool.run(modified_command)
+        if self.gui_validator:
+            # Use GUI validation if available
+            from PyQt6.QtCore import QEventLoop
+            loop = QEventLoop()
+            
+            def handle_result(success: bool, output: str):
+                self.result = output
+                loop.quit()
+            
+            # Call GUI validator with callback
+            self.gui_validator(command, handle_result)
+            
+            # Wait for result
+            loop.exec()
+            return self.result
         else:
-            return "Command execution cancelled by user with this input: " + user_input
+            # Terminal validation
+            print(f"\nCommand to execute: {command}")
+            user_input = input("Do you want to execute this command? (y/n/modify): ").lower().strip()
+            
+            if user_input == 'modify':
+                command = input("Enter the modified command: ").strip()
+                if not command:
+                    return "Command execution cancelled by user"
+            elif user_input != 'y':
+                return "Command execution cancelled by user"
+            
+            return self.shell_tool.run(command)
 
 class ConversationManager:
     """Manages conversation history for both preprocessor and core model"""
@@ -67,7 +87,7 @@ class ConversationManager:
         return memory_messages
 
 class Aida:
-    def __init__(self, config: Optional[AidaConfig] = None):
+    def __init__(self, config: Optional[AidaConfig] = None, gui_validator=None):
         self.config = config or AidaConfig()
         
         # Initialize conversation manager
@@ -80,6 +100,7 @@ class Aida:
             temperature=0
         )
         
+        self.gui_validator = gui_validator
         self.tools = self._setup_tools()
         self.agent = self._setup_agent()
         
@@ -93,7 +114,7 @@ class Aida:
         return [
             Tool(
                 name="shell",
-                func=ValidatedShellTool().run,
+                func=ValidatedShellTool(gui_validator=self.gui_validator).run,
                 description="""Execute shell commands on the server. Use this tool to run commands and get their output.
                 The command will be shown to the user for validation before execution.
                 Example:
