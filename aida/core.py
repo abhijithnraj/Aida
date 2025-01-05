@@ -1,53 +1,21 @@
 from typing import Optional, List, Dict
 from langchain.agents import initialize_agent, AgentType
 from langchain.agents import Tool
-from langchain_community.tools import ShellTool
+from langchain_community.tools import ShellTool,DuckDuckGoSearchRun
 from langchain.memory import ConversationBufferWindowMemory
 from langchain.schema import HumanMessage, AIMessage
 from .preprocessor import QueryPreprocessor
 from .config import AidaConfig
 from .providers import LLMProviderFactory
 import logging
+import re
+from .tools.coder_tool import PythonCoder
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-class ValidatedShellTool:
-    """A wrapper around ShellTool that requires user validation before execution"""
-    def __init__(self, gui_validator=None):
-        self.shell_tool = ShellTool()
-        self.gui_validator = gui_validator
-        self.result = None
-    
-    def run(self, command: str) -> str:
-        if self.gui_validator:
-            # Use GUI validation if available
-            from PyQt6.QtCore import QEventLoop
-            loop = QEventLoop()
-            
-            def handle_result(success: bool, output: str):
-                self.result = output
-                loop.quit()
-            
-            # Call GUI validator with callback
-            self.gui_validator(command, handle_result)
-            
-            # Wait for result
-            loop.exec()
-            return self.result
-        else:
-            # Terminal validation
-            print(f"\nCommand to execute: {command}")
-            user_input = input("Do you want to execute this command? (y/n/modify): ").lower().strip()
-            
-            if user_input == 'modify':
-                command = input("Enter the modified command: ").strip()
-                if not command:
-                    return "Command execution cancelled by user"
-            elif user_input != 'y':
-                return "Command execution cancelled by user"
-            
-            return self.shell_tool.run(command)
+# from .tools.coder_tool import WriteCodeAndExecute
+from .tools.validated_shelltool import shell_tool
 
 class ConversationManager:
     """Manages conversation history for both preprocessor and core model"""
@@ -112,18 +80,26 @@ class Aida:
     
     def _setup_tools(self) -> list[Tool]:
         return [
-            Tool(
-                name="shell",
-                func=ValidatedShellTool(gui_validator=self.gui_validator).run,
-                description="""Execute shell commands on the server. Use this tool to run commands and get their output.
-                The command will be shown to the user for validation before execution.
-                Example:
-                Action: shell
-                Action Input: who
-                Observation: user1    pts/0    2024-01-31 10:00 (:0)
-                Thought: The 'who' command shows user1 is logged in
-                """
-            )
+            shell_tool,
+            Tool(name="duckduckgo",
+                 func = DuckDuckGoSearchRun().run,
+                 description="Use this to search for information when you need it or cant get a job done."),
+            Tool(name="python_coder",
+                 func=PythonCoder(llm=self.llm.llm).process_query,
+                 description="""This code will use an agent to write the code and execute it. You only need to pass in the query. The generated code will be in generated_code.py
+                 This tool can handle installing packages and executing code. 
+
+                 You must provide a very detailed description of the code you want to write.
+                 
+                 Example:
+                 Action: write_code
+                 Action Input: Write a python function to find the 7th prime number. Then call the function with 7 as the argument and print the result.
+                 Observation: Code written to file generated_code.py
+                 Action: shell
+                 Action Input: python generated_code.py
+                 Observation: The 7th prime number is 17
+                 Final Answer: The 7th prime number is 17
+                 """)
         ]
     
     def _setup_agent(self):
@@ -138,7 +114,7 @@ class Aida:
             early_stopping_method="force",
             return_intermediate_steps=True,
             agent_kwargs={
-                "prefix": """You are AIDA, a helpful AI assistant that helps users manage their server.
+                "prefix": """You are AIDA, a helpful AI assistant.
                 When asked a question, you MUST use the available tools to help the user.
                 NEVER make up or hallucinate command outputs.
                 ALWAYS use the shell tool to execute commands and get real output.
@@ -156,6 +132,10 @@ class Aida:
                 7. Always end the response with a Final Answer. This is very important and it has to answer the query posed by the user.
                 8. Only the Final answer is shown to the user, so it should include all the information needed to answer the query.
                 9. For follow-up questions, consider the context from previous interactions.
+                10. You can install a new package if required. But always follow these below rlules:
+                     - Before you install anything, verify that the package does not exist on the system and 
+                     - Always find out which OS is running on the server to use the correct package manager.
+
                 Example interaction:
                 Example 1:
                     Question: How many users are logged in?
@@ -179,7 +159,30 @@ class Aida:
                     Question: When did they log in?
                     Thought: From the previous 'who' command output, I can see the login times
                     Final Answer: Looking at the previous information: user1 logged in at 10:00, user2 at 10:05, and user3 at 10:10 on January 31st, 2024.
-                """,
+                
+                Example 4:
+                    Question: Plot the iris dataset
+                    Thought: I need to use the python_coder tool to write the code to plot the iris dataset
+                    Action: python_coder
+                    Action Input: Plot the iris dataset
+                    Observation: Code written to file generated_code.py
+                    Action: shell
+                    Action Input: python generated_code.py
+                    Observation: The iris dataset has been plotted
+                    Final Answer: The iris dataset has been plotted
+                
+                Example 5:
+                    Question: Write the code to find the 7th prime number
+                    Thought: I need to use the python_coder tool to write the code to find the 7th prime number
+                    Action: python_coder
+                    Action Input: Find the 7th prime number
+                    Observation: Code written to file generated_code.py
+                    Action: shell
+                    Action Input: python generated_code.py
+                    Observation: The 7th prime number is 17
+                    Final Answer: The 7th prime number is 17
+                 
+                   """,
                 "format_instructions": """To use a tool, please use the following format:
                 Thought: I need to use X tool because...
                 Action: the action to take, should be one of [{tool_names}]
@@ -215,11 +218,12 @@ class Aida:
         prompt = self.conversation.get_recent_messages() + f"\nUser: {query}"
         
         # First check if query is relevant using preprocessor
-        preprocessor_result = self.preprocessor.process_query(query)
-        if not preprocessor_result.is_relevant:
-            response = preprocessor_result.response or "This query is not related to server management."
-            self.conversation.add_assistant_message(response)
-            return response
+        #TODO: We need to move the preprocessor check out of AIDA. Its too restrictive.
+        # preprocessor_result = self.preprocessor.process_query(query)
+        # if not preprocessor_result.is_relevant:
+        #     response = preprocessor_result.response or "This query is not related to server management."
+        #     self.conversation.add_assistant_message(response)
+        #     return response
             
         try:
             # Run the agent to process the query
